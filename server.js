@@ -12,8 +12,8 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 // Supabase 接続設定 (Renderの環境変数から取得)
-const SUPABASE_URL = process.env.SUPABASE_URL || "YOUR_SUPABASE_URL";
-const SUPABASE_KEY = process.env.SUPABASE_KEY || "YOUR_SUPABASE_ANON_KEY";
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://pvgsuzokgxatczcrxevw.supabase.co";
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB2Z3N1em9rZ3hhdGN6Y3J4ZXZ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk5MTI0MjYsImV4cCI6MjEwNTQ4ODQyNn0.HQN-Po9SR9go7tAnWfna_iBgPEFlYzAGGCi2sE3ZYoY";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const server = http.createServer(app);
