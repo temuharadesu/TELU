@@ -1,3 +1,6 @@
+// ==========================================
+// Render バックエンドサーバー (server.js)
+// ==========================================
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -6,227 +9,199 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); // 画像送信に対応するため上限設定
+app.use(express.json({ limit: '10mb' })); // 画像送信対応
+
+// --- Supabase 接続設定 ---
+// Renderの環境変数（Environment Variables）に設定するか、直接文字列で書き換えてください
+const SUPABASE_URL = process.env.SUPABASE_URL || "YOUR_SUPABASE_URL";
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "YOUR_SUPABASE_ANON_KEY";
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*" }
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-// Supabase初期化（Renderの環境変数が設定されていれば有効化）
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const supabase = (SUPABASE_URL && SUPABASE_KEY) ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+// Admin設定
+const ADMIN_PASS = "桜桜今咲き誇る刹那に散り行く定と知って";
 
-// メモリ内データ保持（高速読み出し用）
-let users = {};
-let groups = [];
-let messages = [];
-let onlineUsers = {};
-let adSettings = { ad_text: "", ad_speed: "10" };
+// --- ヘルパー関数 ---
+function mapUser(u) {
+  if (!u) return null;
+  return {
+    userId: String(u.user_id),
+    userName: u.user_name || 'ユーザー',
+    avatar: u.avatar || '😊',
+    password: u.password || '',
+    isAdmin: Boolean(u.is_admin),
+    status: u.status || 'active',
+    friends: Array.isArray(u.friends) ? u.friends : (u.friends ? JSON.parse(u.friends) : [])
+  };
+}
 
-// --- REST API エンドポイント ---
+function mapMessage(m) {
+  if (!m) return null;
+  return {
+    msgId: String(m.id),
+    id: String(m.id),
+    fromId: String(m.from_id),
+    toId: String(m.to_id),
+    message: m.message || '',
+    isGroup: Boolean(m.is_group),
+    replyTo: m.reply_to || null,
+    timestamp: m.created_at
+  };
+}
 
-// 動作確認用
-app.get('/ping', (req, res) => res.send('pong'));
+function mapGroup(g) {
+  if (!g) return null;
+  return {
+    groupId: String(g.group_id),
+    groupName: g.group_name || '',
+    avatar: g.avatar || '👥',
+    members: Array.isArray(g.members) ? g.members : (g.members ? JSON.parse(g.members) : [])
+  };
+}
 
-// ユーザー取得 (単体)
-app.get('/api/users/:id', (req, res) => {
-  const user = users[req.params.id];
-  if (!user) return res.status(404).json({ message: 'User not found' });
-  res.json(user);
+// --- API エンドポイント ---
+
+// 1. 初期データ一括取得
+app.get('/api/init', async (req, res) => {
+  try {
+    const [uRes, gRes, mRes] = await Promise.all([
+      supabase.from('users').select('*'),
+      supabase.from('groups').select('*'),
+      supabase.from('messages').select('*').order('created_at', { ascending: true })
+    ]);
+
+    const users = {};
+    if (uRes.data) uRes.data.forEach(u => { const mapped = mapUser(u); users[mapped.userId] = mapped; });
+    const groups = gRes.data ? gRes.data.map(mapGroup) : [];
+    const messages = mRes.data ? mRes.data.map(mapMessage) : [];
+
+    res.json({ users, groups, messages });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// ユーザー取得 (一覧)
-app.get('/api/users', (req, res) => {
-  res.json(Object.values(users));
+// 2. ユーザー取得 / 登録 / ログイン
+app.post('/api/login', async (req, res) => {
+  const { userId, password } = req.body;
+  const { data: user, error } = await supabase.from('users').select('*').eq('user_id', userId).single();
+  if (error || !user) return res.status(404).json({ error: 'ユーザーが見つかりません' });
+  if ((user.password || '') !== (password || '')) return res.status(401).json({ error: 'パスワードが違います' });
+  res.json({ user: mapUser(user) });
 });
 
-// 新規登録
 app.post('/api/register', async (req, res) => {
-  const userId = String(Math.floor(1000 + Math.random() * 9000));
-  const isFirstUser = Object.keys(users).length === 0;
-  const newUser = {
-    userId,
-    userName: `ユーザー_${userId}`,
+  const newUserId = Math.floor(1000 + Math.random() * 9000).toString();
+  const { data: existing } = await supabase.from('users').select('user_id');
+  const isAdmin = (!existing || existing.length === 0);
+
+  const newUserRow = {
+    user_id: newUserId,
+    user_name: 'ユーザー_' + newUserId,
     avatar: '😊',
     password: '',
-    isAdmin: isFirstUser,
+    is_admin: isAdmin,
     status: 'active',
     friends: []
   };
-  users[userId] = newUser;
 
-  if (supabase) {
-    try {
-      await supabase.from('users').insert({
-        user_id: userId,
-        user_name: newUser.userName,
-        avatar: newUser.avatar,
-        is_admin: isFirstUser,
-        status: 'active'
-      });
-    } catch(e) { console.error('Supabase 保存エラー:', e); }
-  }
-
-  io.emit('users_updated', Object.values(users));
-  res.json(newUser);
+  const { error } = await supabase.from('users').insert([newUserRow]);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ user: mapUser(newUserRow) });
 });
 
-// ログイン
-app.post('/api/login', (req, res) => {
-  const { userId, password } = req.body;
-  const user = users[userId];
-  if (!user) return res.status(404).json({ message: 'ユーザーが存在しません' });
-  if (user.password && user.password !== password) {
-    return res.status(401).json({ message: 'パスワードが違います' });
-  }
-  res.json(user);
-});
+// 3. ユーザープロファイル更新
+app.post('/api/user/update', async (req, res) => {
+  const { userId, userName, avatar, password, status, is_admin } = req.body;
+  const updateData = {};
+  if (userName !== undefined) updateData.user_name = userName;
+  if (avatar !== undefined) updateData.avatar = avatar;
+  if (password !== undefined) updateData.password = password;
+  if (status !== undefined) updateData.status = status;
+  if (is_admin !== undefined) updateData.is_admin = is_admin;
 
-// ユーザー更新 (名前, アバター, 権限など)
-app.patch('/api/users/:id', async (req, res) => {
-  const user = users[req.params.id];
-  if (!user) return res.status(404).json({ message: 'Not found' });
-  Object.assign(user, req.body);
-
-  if (supabase) {
-    try {
-      await supabase.from('users').update({
-        user_name: user.userName,
-        avatar: user.avatar,
-        is_admin: user.isAdmin,
-        status: user.status
-      }).eq('user_id', user.userId);
-    } catch(e) { console.error('Supabase 更新エラー:', e); }
-  }
-
-  io.emit('users_updated', Object.values(users));
-  res.json(user);
-});
-
-// パスワード変更
-app.post('/api/users/:id/password', (req, res) => {
-  const user = users[req.params.id];
-  const { oldPassword, newPassword } = req.body;
-  if (!user) return res.status(404).json({ message: 'Not found' });
-  if (user.password && user.password !== oldPassword) {
-    return res.status(400).json({ message: '現在のパスワードが間違っています' });
-  }
-  user.password = newPassword;
+  const { error } = await supabase.from('users').update(updateData).eq('user_id', userId);
+  if (error) return res.status(500).json({ error: error.message });
+  
+  io.emit('user-updated', { userId, ...updateData });
   res.json({ success: true });
 });
 
-// アカウント削除
-app.delete('/api/users/:id', async (req, res) => {
-  delete users[req.params.id];
-  if (supabase) {
-    try { await supabase.from('users').delete().eq('user_id', req.params.id); } catch(e) {}
-  }
-  io.emit('users_updated', Object.values(users));
-  res.json({ success: true });
-});
-
-// 友達追加
-app.post('/api/friends/add', (req, res) => {
+// 4. 友達追加
+app.post('/api/friends/add', async (req, res) => {
   const { userId, targetId } = req.body;
-  const u1 = users[userId];
-  const u2 = users[targetId];
-  if (!u1 || !u2) return res.status(404).json({ message: 'ユーザーが見つかりません' });
+  const { data: user } = await supabase.from('users').select('friends').eq('user_id', userId).single();
+  if (!user) return res.status(404).json({ error: 'ユーザーが存在しません' });
 
-  if (!u1.friends.includes(targetId)) u1.friends.push(targetId);
-  if (!u2.friends.includes(userId)) u2.friends.push(userId);
+  let friends = Array.isArray(user.friends) ? user.friends : (user.friends ? JSON.parse(user.friends) : []);
+  if (!friends.includes(targetId)) friends.push(targetId);
 
-  io.emit('users_updated', Object.values(users));
-  res.json({ success: true });
+  const { error } = await supabase.from('users').update({ friends }).eq('user_id', userId);
+  if (error) return res.status(500).json({ error: error.message });
+
+  io.emit('user-updated', { userId, friends });
+  res.json({ success: true, friends });
 });
 
-// 友達削除
-app.post('/api/friends/remove', (req, res) => {
-  const { userId, targetId } = req.body;
-  if (users[userId]) users[userId].friends = users[userId].friends.filter(id => id !== targetId);
-  if (users[targetId]) users[targetId].friends = users[targetId].friends.filter(id => id !== userId);
-  io.emit('users_updated', Object.values(users));
-  res.json({ success: true });
-});
+// 5. グループ作成
+app.post('/api/groups/create', async (req, res) => {
+  const { groupName, members } = req.body;
+  const newGroup = {
+    group_id: "g_" + Date.now(),
+    group_name: groupName,
+    avatar: "👥",
+    members: members
+  };
+  const { error } = await supabase.from('groups').insert([newGroup]);
+  if (error) return res.status(500).json({ error: error.message });
 
-// グループ機能
-app.get('/api/groups', (req, res) => res.json(groups));
-app.post('/api/groups', (req, res) => {
-  const group = req.body;
-  groups.push(group);
-  io.emit('groups_updated', groups);
-  res.json(group);
-});
-app.delete('/api/groups/:id', (req, res) => {
-  groups = groups.filter(g => g.groupId !== req.params.id);
-  io.emit('groups_updated', groups);
-  res.json({ success: true });
-});
-
-// メッセージ一覧取得
-app.get('/api/messages', (req, res) => res.json(messages));
-
-// 管理者機能 (承認待ち一覧・お知らせ更新)
-app.get('/api/admin/pending-users', (req, res) => {
-  const pending = Object.values(users).filter(u => u.status === 'pending');
-  res.json(pending);
-});
-app.post('/api/settings/ad', (req, res) => {
-  adSettings = req.body;
-  io.emit('ad_updated', adSettings);
-  res.json({ success: true });
+  const mapped = mapGroup(newGroup);
+  io.emit('group-created', mapped);
+  res.json({ group: mapped });
 });
 
 // --- Socket.io リアルタイム通信 ---
 io.on('connection', (socket) => {
-  // ユーザーのオンライン登録
-  socket.on('setup_user', ({ userId }) => {
-    onlineUsers[userId] = { state: 'online', socketId: socket.id };
-    socket.userId = userId;
-    io.emit('user_status_change', onlineUsers);
-  });
+  // メッセージ送信
+  socket.on('send-message', async (data) => {
+    const { fromId, toId, message, isGroup, replyTo } = data;
+    const msgId = "m_" + Date.now();
 
-  // メッセージ送信処理
-  socket.on('send_message', async (data) => {
-    messages.push(data);
-    io.emit('new_message', data);
+    const dbMsg = {
+      id: msgId,
+      from_id: String(fromId).trim(),
+      to_id: String(toId).trim(),
+      message: message,
+      is_group: Boolean(isGroup),
+      reply_to: replyTo || null,
+      created_at: new Date().toISOString()
+    };
 
-    if (supabase) {
-      try {
-        await supabase.from('messages').insert({
-          id: data.msgId,
-          from_id: data.fromId,
-          to_id: data.toId,
-          message: data.message,
-          is_group: data.isGroup || false,
-          reply_to: data.replyTo || null
-        });
-      } catch (err) {
-        console.error('Supabase メッセージ保存エラー:', err);
-      }
+    // DBへ保存
+    const { error } = await supabase.from('messages').insert([dbMsg]);
+    if (!error) {
+      const mapped = mapMessage(dbMsg);
+      // 全クライアントにリアルタイム転送
+      io.emit('receive-message', mapped);
     }
   });
 
-  // 既読状態の同期
-  socket.on('update_read_status', (data) => {
-    io.emit('read_status_updated', data);
+  // 既読状態の共有
+  socket.on('read-status', (data) => {
+    socket.broadcast.emit('read-status', data);
   });
 
-  // ログアウト処理
-  socket.on('logout', ({ userId }) => {
-    delete onlineUsers[userId];
-    io.emit('user_status_change', onlineUsers);
-  });
-
-  // 切断（アプリ終了・オフライン化）
-  socket.on('disconnect', () => {
-    if (socket.userId) {
-      delete onlineUsers[socket.userId];
-      io.emit('user_status_change', onlineUsers);
-    }
+  // 管理者お知らせ
+  socket.on('admin-ad', (data) => {
+    io.emit('admin-ad', data);
   });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Render Server running on port ${PORT}`);
+});
