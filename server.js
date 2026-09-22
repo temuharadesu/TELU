@@ -22,8 +22,10 @@ const io = new Server(server, {
   }
 });
 
+// オンライン状態の管理
 const onlineStatus = {};
 
+// データ変換ヘルパー関数
 function mapUser(u) {
   if (!u) return null;
   return {
@@ -33,7 +35,7 @@ function mapUser(u) {
     password: u.password || '',
     isAdmin: Boolean(u.is_admin),
     status: u.status || 'active',
-    friends: Array.isArray(u.friends) ? u.friends : (u.friends ? JSON.parse(u.friends) : [])
+    friends: Array.isArray(u.friends) ? u.friends : (u.friends ? (typeof u.friends === 'string' ? JSON.parse(u.friends) : u.friends) : [])
   };
 }
 
@@ -43,7 +45,7 @@ function mapGroup(g) {
     groupId: String(g.group_id),
     groupName: g.group_name || '',
     avatar: g.avatar || '👥',
-    members: Array.isArray(g.members) ? g.members : (g.members ? JSON.parse(g.members) : [])
+    members: Array.isArray(g.members) ? g.members : (g.members ? (typeof g.members === 'string' ? JSON.parse(g.members) : g.members) : [])
   };
 }
 
@@ -60,27 +62,40 @@ function mapMessage(m) {
   };
 }
 
+// リアルタイムブロードキャストヘルパー
 async function broadcastUsers() {
-  const { data } = await supabase.from('users').select('*');
-  if (data) io.emit('users_updated', data.map(mapUser));
+  try {
+    const { data } = await supabase.from('users').select('*');
+    if (data) io.emit('users_updated', data.map(mapUser));
+  } catch (err) {
+    console.error("broadcastUsers エラー:", err);
+  }
 }
 
 async function broadcastGroups() {
-  const { data } = await supabase.from('groups').select('*');
-  if (data) io.emit('groups_updated', data.map(mapGroup));
+  try {
+    const { data } = await supabase.from('groups').select('*');
+    if (data) io.emit('groups_updated', data.map(mapGroup));
+  } catch (err) {
+    console.error("broadcastGroups エラー:", err);
+  }
 }
 
 // REST API エンドポイント
+
+// ユーザー一覧取得
 app.get('/api/users', async (req, res) => {
   try {
     const { data, error } = await supabase.from('users').select('*');
     if (error) throw error;
     res.json(data ? data.map(mapUser) : []);
   } catch (err) {
+    console.error("ユーザー取得エラー:", err);
     res.status(500).json([]);
   }
 });
 
+// 単一ユーザー取得
 app.get('/api/users/:id', async (req, res) => {
   try {
     const { data, error } = await supabase.from('users').select('*').eq('user_id', req.params.id).single();
@@ -91,6 +106,7 @@ app.get('/api/users/:id', async (req, res) => {
   }
 });
 
+// ログイン
 app.post('/api/login', async (req, res) => {
   try {
     const { userId, password } = req.body;
@@ -104,15 +120,18 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// 新規ユーザー登録
 app.post('/api/register', async (req, res) => {
   try {
     let newUserId = '';
     let isUnique = false;
+    let attempts = 0;
     
-    while (!isUnique) {
+    while (!isUnique && attempts < 10) {
       newUserId = Math.floor(100000 + Math.random() * 900000).toString();
       const { data } = await supabase.from('users').select('user_id').eq('user_id', newUserId).single();
       if (!data) isUnique = true;
+      attempts++;
     }
 
     const { data: allUsers } = await supabase.from('users').select('user_id');
@@ -138,6 +157,7 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
+// ユーザー情報更新
 app.patch('/api/users/:id', async (req, res) => {
   try {
     const updateData = {};
@@ -156,6 +176,7 @@ app.patch('/api/users/:id', async (req, res) => {
   }
 });
 
+// パスワード変更
 app.post('/api/users/:id/password', async (req, res) => {
   try {
     const { oldPassword, newPassword } = req.body;
@@ -172,6 +193,7 @@ app.post('/api/users/:id/password', async (req, res) => {
   }
 });
 
+// ユーザー削除
 app.delete('/api/users/:id', async (req, res) => {
   try {
     await supabase.from('users').delete().eq('user_id', req.params.id);
@@ -182,6 +204,7 @@ app.delete('/api/users/:id', async (req, res) => {
   }
 });
 
+// 友達追加
 app.post('/api/friends/add', async (req, res) => {
   try {
     const { userId, targetId } = req.body;
@@ -189,7 +212,7 @@ app.post('/api/friends/add', async (req, res) => {
     if (!target) return res.status(400).json({ message: '該当ユーザーが見つかりません' });
 
     const { data: user } = await supabase.from('users').select('friends').eq('user_id', userId).single();
-    let friends = Array.isArray(user?.friends) ? user.friends : (user?.friends ? JSON.parse(user.friends) : []);
+    let friends = Array.isArray(user?.friends) ? user.friends : (user?.friends ? (typeof user.friends === 'string' ? JSON.parse(user.friends) : user.friends) : []);
     
     if (!friends.includes(targetId)) {
       friends.push(targetId);
@@ -203,13 +226,14 @@ app.post('/api/friends/add', async (req, res) => {
   }
 });
 
+// 友達削除
 app.post('/api/friends/remove', async (req, res) => {
   try {
     const { userId, targetId } = req.body;
     const { data: user } = await supabase.from('users').select('friends').eq('user_id', userId).single();
     
     if (user) {
-      let friends = Array.isArray(user.friends) ? user.friends : (user.friends ? JSON.parse(user.friends) : []);
+      let friends = Array.isArray(user.friends) ? user.friends : (user.friends ? (typeof user.friends === 'string' ? JSON.parse(user.friends) : user.friends) : []);
       friends = friends.filter(id => String(id) !== String(targetId));
       await supabase.from('users').update({ friends }).eq('user_id', userId);
     }
@@ -221,6 +245,7 @@ app.post('/api/friends/remove', async (req, res) => {
   }
 });
 
+// グループ一覧取得
 app.get('/api/groups', async (req, res) => {
   try {
     const { data } = await supabase.from('groups').select('*');
@@ -230,6 +255,7 @@ app.get('/api/groups', async (req, res) => {
   }
 });
 
+// グループ作成
 app.post('/api/groups', async (req, res) => {
   try {
     const { groupId, groupName, avatar, members } = req.body;
@@ -248,7 +274,7 @@ app.post('/api/groups', async (req, res) => {
   }
 });
 
-// グループ情報（メンバー一覧含む）の更新用API
+// グループ情報（メンバー一覧含む）の更新
 app.patch('/api/groups/:id', async (req, res) => {
   try {
     const updateData = {};
@@ -266,6 +292,7 @@ app.patch('/api/groups/:id', async (req, res) => {
   }
 });
 
+// グループ削除
 app.delete('/api/groups/:id', async (req, res) => {
   try {
     await supabase.from('groups').delete().eq('group_id', req.params.id);
@@ -276,11 +303,12 @@ app.delete('/api/groups/:id', async (req, res) => {
   }
 });
 
+// メッセージ履歴取得
 app.get('/api/messages', async (req, res) => {
   try {
     let query = supabase.from('messages').select('*').order('created_at', { ascending: true });
     if (req.query.limit) {
-      query = query.limit(parseInt(req.query.limit));
+      query = query.limit(parseInt(req.query.limit, 10));
     }
     const { data, error } = await query;
     if (error) throw error;
@@ -291,6 +319,7 @@ app.get('/api/messages', async (req, res) => {
   }
 });
 
+// 承認待ちユーザー一覧（管理者用）
 app.get('/api/admin/pending-users', async (req, res) => {
   try {
     const { data } = await supabase.from('users').select('*').eq('status', 'pending');
@@ -300,6 +329,7 @@ app.get('/api/admin/pending-users', async (req, res) => {
   }
 });
 
+// 広告設定更新
 app.post('/api/settings/ad', async (req, res) => {
   const { ad_text, ad_speed } = req.body;
   io.emit('ad_updated', { ad_text, ad_speed });
