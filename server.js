@@ -9,7 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Supabase 接続設定 (Renderの環境変数から取得)
+// Supabase 接続設定
 const SUPABASE_URL = process.env.SUPABASE_URL || "dummy";
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "dummy";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -24,7 +24,6 @@ const io = new Server(server, {
 
 const onlineStatus = {};
 
-// --- Supabase ↔ アプリ間 データマッピング関数 ---
 function mapUser(u) {
   if (!u) return null;
   return {
@@ -71,10 +70,7 @@ async function broadcastGroups() {
   if (data) io.emit('groups_updated', data.map(mapGroup));
 }
 
-// ==========================================
 // REST API エンドポイント
-// ==========================================
-
 app.get('/api/users', async (req, res) => {
   try {
     const { data, error } = await supabase.from('users').select('*');
@@ -252,6 +248,24 @@ app.post('/api/groups', async (req, res) => {
   }
 });
 
+// グループ情報（メンバー一覧含む）の更新用API
+app.patch('/api/groups/:id', async (req, res) => {
+  try {
+    const updateData = {};
+    if (req.body.groupName !== undefined) updateData.group_name = req.body.groupName;
+    if (req.body.avatar !== undefined) updateData.avatar = req.body.avatar;
+    if (req.body.members !== undefined) updateData.members = req.body.members;
+
+    const { error } = await supabase.from('groups').update(updateData).eq('group_id', req.params.id);
+    if (error) throw error;
+
+    await broadcastGroups();
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 app.delete('/api/groups/:id', async (req, res) => {
   try {
     await supabase.from('groups').delete().eq('group_id', req.params.id);
@@ -262,7 +276,6 @@ app.delete('/api/groups/:id', async (req, res) => {
   }
 });
 
-// メッセージ取得 (created_at でソート)
 app.get('/api/messages', async (req, res) => {
   try {
     let query = supabase.from('messages').select('*').order('created_at', { ascending: true });
@@ -293,9 +306,7 @@ app.post('/api/settings/ad', async (req, res) => {
   res.json({ success: true });
 });
 
-// ==========================================
 // Socket.io リアルタイム通信
-// ==========================================
 io.on('connection', (socket) => {
   socket.on('setup_user', ({ userId }) => {
     if (userId) {
@@ -311,7 +322,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // メッセージ送信処理 (Supabaseの id, created_at, jsonb カラム型に完全対応)
   socket.on('send_message', async (data) => {
     let replyData = null;
     if (data.replyTo) {
