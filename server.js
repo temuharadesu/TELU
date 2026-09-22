@@ -9,6 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// Supabase 接続設定 (Renderの環境変数から取得)
 const SUPABASE_URL = process.env.SUPABASE_URL || "dummy";
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "dummy";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -23,7 +24,7 @@ const io = new Server(server, {
 
 const onlineStatus = {};
 
-// --- マッピング関数 ---
+// --- Supabase ↔ アプリ間 データマッピング関数 ---
 function mapUser(u) {
   if (!u) return null;
   return {
@@ -50,11 +51,11 @@ function mapGroup(g) {
 function mapMessage(m) {
   if (!m) return null;
   return {
-    msgId: String(m.msg_id || m.id),
+    msgId: String(m.id || m.msg_id),
     fromId: String(m.from_id),
     toId: String(m.to_id),
     message: m.message || '',
-    timestamp: m.timestamp || m.created_at,
+    timestamp: m.created_at || m.timestamp,
     isGroup: Boolean(m.is_group),
     replyTo: m.reply_to || null
   };
@@ -62,19 +63,18 @@ function mapMessage(m) {
 
 async function broadcastUsers() {
   const { data } = await supabase.from('users').select('*');
-  if (data) {
-    io.emit('users_updated', data.map(mapUser));
-  }
+  if (data) io.emit('users_updated', data.map(mapUser));
 }
 
 async function broadcastGroups() {
   const { data } = await supabase.from('groups').select('*');
-  if (data) {
-    io.emit('groups_updated', data.map(mapGroup));
-  }
+  if (data) io.emit('groups_updated', data.map(mapGroup));
 }
 
-// REST API
+// ==========================================
+// REST API エンドポイント
+// ==========================================
+
 app.get('/api/users', async (req, res) => {
   try {
     const { data, error } = await supabase.from('users').select('*');
@@ -108,7 +108,6 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// 新規登録 (ID重複防止ループ追加)
 app.post('/api/register', async (req, res) => {
   try {
     let newUserId = '';
@@ -208,7 +207,6 @@ app.post('/api/friends/add', async (req, res) => {
   }
 });
 
-// 友達削除 (パース処理を修復)
 app.post('/api/friends/remove', async (req, res) => {
   try {
     const { userId, targetId } = req.body;
@@ -264,10 +262,10 @@ app.delete('/api/groups/:id', async (req, res) => {
   }
 });
 
-// メッセージ取得 (timestampフォールバック付きソート)
+// メッセージ取得 (created_at でソート)
 app.get('/api/messages', async (req, res) => {
   try {
-    let query = supabase.from('messages').select('*').order('timestamp', { ascending: true });
+    let query = supabase.from('messages').select('*').order('created_at', { ascending: true });
     if (req.query.limit) {
       query = query.limit(parseInt(req.query.limit));
     }
@@ -275,6 +273,7 @@ app.get('/api/messages', async (req, res) => {
     if (error) throw error;
     res.json(data ? data.map(mapMessage) : []);
   } catch (err) {
+    console.error("メッセージ取得エラー:", err);
     res.status(500).json([]);
   }
 });
@@ -294,7 +293,9 @@ app.post('/api/settings/ad', async (req, res) => {
   res.json({ success: true });
 });
 
-// Socket.io 通信設定
+// ==========================================
+// Socket.io リアルタイム通信
+// ==========================================
 io.on('connection', (socket) => {
   socket.on('setup_user', ({ userId }) => {
     if (userId) {
@@ -310,15 +311,21 @@ io.on('connection', (socket) => {
     }
   });
 
+  // メッセージ送信処理 (Supabaseの id, created_at, jsonb カラム型に完全対応)
   socket.on('send_message', async (data) => {
+    let replyData = null;
+    if (data.replyTo) {
+      replyData = typeof data.replyTo === 'object' ? data.replyTo : { text: String(data.replyTo) };
+    }
+
     const dbMsg = {
-      msg_id: data.msgId,
-      from_id: data.fromId,
-      to_id: data.toId,
-      message: data.message,
-      timestamp: data.timestamp || new Date().toISOString(),
+      id: String(data.msgId),
+      from_id: String(data.fromId),
+      to_id: String(data.toId),
+      message: String(data.message || ''),
+      created_at: data.timestamp || new Date().toISOString(),
       is_group: Boolean(data.isGroup),
-      reply_to: data.replyTo || null
+      reply_to: replyData
     };
 
     const { error } = await supabase.from('messages').insert([dbMsg]);
