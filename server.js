@@ -81,7 +81,9 @@ async function broadcastGroups() {
   }
 }
 
-// REST API エンドポイント
+/* ==========================================
+   REST API エンドポイント
+   ========================================== */
 
 // ユーザー一覧取得
 app.get('/api/users', async (req, res) => {
@@ -319,6 +321,22 @@ app.get('/api/messages', async (req, res) => {
   }
 });
 
+// メッセージ削除 API (追加)
+app.delete('/api/messages/:id', async (req, res) => {
+  try {
+    const msgId = req.params.id;
+    const { error } = await supabase.from('messages').delete().eq('id', msgId);
+    if (error) throw error;
+
+    // 全接続クライアントにメッセージ削除を通知
+    io.emit('message_deleted', { msgId });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("メッセージ削除エラー:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // 承認待ちユーザー一覧（管理者用）
 app.get('/api/admin/pending-users', async (req, res) => {
   try {
@@ -336,7 +354,9 @@ app.post('/api/settings/ad', async (req, res) => {
   res.json({ success: true });
 });
 
-// Socket.io リアルタイム通信
+/* ==========================================
+   Socket.io リアルタイム通信
+   ========================================== */
 io.on('connection', (socket) => {
   socket.on('setup_user', ({ userId }) => {
     if (userId) {
@@ -374,6 +394,20 @@ io.on('connection', (socket) => {
     } else {
       console.error("メッセージ保存エラー:", error);
       socket.emit('message_send_failed', { msgId: data.msgId, error: error.message });
+    }
+  });
+
+  // リアルタイム・メッセージ削除イベント (追加)
+  socket.on('delete_message', async ({ msgId }) => {
+    try {
+      const { error } = await supabase.from('messages').delete().eq('id', msgId);
+      if (!error) {
+        io.emit('message_deleted', { msgId });
+      } else {
+        console.error("Socketメッセージ削除エラー:", error);
+      }
+    } catch (err) {
+      console.error("Socketメッセージ削除例外:", err);
     }
   });
 
